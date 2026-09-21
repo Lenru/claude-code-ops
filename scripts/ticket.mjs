@@ -22,20 +22,15 @@
 // seconds, and writes what happened to ~/.claude/board/ticket-last.json, because a
 // hook that fails silently is how NewsRadar stayed dead for a month.
 //
-// Raw fetch, not supabase-js: this runs at the end of every turn of every chat on
-// the machine, and the import alone costs more than the request.
+// The database call is scripts/lib/hub-rpc.mjs: raw fetch, not supabase-js, because
+// this runs at the end of every turn of every chat on the machine.
 
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { parseTranscript, qualifies } from "./lib/ticket-parse.mjs";
+import { rpc } from "./lib/hub-rpc.mjs";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
-try { process.loadEnvFile(join(ROOT, ".env.local")); } catch { /* exported */ }
-
-const URL_ = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const PROJECTS = join(homedir(), ".claude", "projects");
 const LAST = join(homedir(), ".claude", "board", "ticket-last.json");
 
@@ -53,24 +48,6 @@ const arg = (name) => {
 };
 const flag = (name) => process.argv.includes(`--${name}`);
 const cut = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s ?? null);
-
-async function rpc(fn, args, timeoutMs = 8000, select = null) {
-  if (!URL_ || !KEY) throw new Error("NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing from .env.local");
-  const res = await fetch(`${URL_}/rest/v1/rpc/${fn}${select ? `?select=${select}` : ""}`, {
-    method: "POST",
-    headers: {
-      apikey: KEY,
-      Authorization: `Bearer ${KEY}`,
-      "Content-Type": "application/json",
-      "Content-Profile": "hub",
-    },
-    body: JSON.stringify(args),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${fn}: HTTP ${res.status} ${text.slice(0, 300)}`);
-  return text ? JSON.parse(text) : null;
-}
 
 function readLines(path) {
   const size = statSync(path).size;
@@ -138,7 +115,7 @@ async function hook() {
       record.result = "skipped: no session on stdin";
     } else {
       const t = ticketFor(input.session_id, input.transcript_path, { lastSaid: input.last_assistant_message });
-      record.result = t.skip ? `skipped: ${t.skip}` : await rpc("ticket_upsert", t.args, 5000);
+      record.result = t.skip ? `skipped: ${t.skip}` : await rpc("ticket_upsert", t.args, { timeoutMs: 5000 });
     }
   } catch (e) {
     record.ok = false;
@@ -150,7 +127,7 @@ async function hook() {
 // Every row, but only the columns a list needs. The free-tier org behind this
 // database is over its egress quota (vault: Cross-cutting/ops-schema.md), and the
 // note and why columns are nine tenths of a ticket's bytes.
-const allTickets = () => rpc("tickets_list", { p_limit: 5000 }, 8000, "id,kind,title,status,project,client,cwd,updated_at");
+const allTickets = () => rpc("tickets_list", { p_limit: 5000 }, { select: "id,kind,title,status,project,client,cwd,updated_at" });
 
 async function resolveId(prefix) {
   const rows = await allTickets();
