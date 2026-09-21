@@ -54,9 +54,9 @@ const arg = (name) => {
 const flag = (name) => process.argv.includes(`--${name}`);
 const cut = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s ?? null);
 
-async function rpc(fn, args, timeoutMs = 8000) {
+async function rpc(fn, args, timeoutMs = 8000, select = null) {
   if (!URL_ || !KEY) throw new Error("NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing from .env.local");
-  const res = await fetch(`${URL_}/rest/v1/rpc/${fn}`, {
+  const res = await fetch(`${URL_}/rest/v1/rpc/${fn}${select ? `?select=${select}` : ""}`, {
     method: "POST",
     headers: {
       apikey: KEY,
@@ -147,8 +147,13 @@ async function hook() {
   try { writeFileSync(LAST, JSON.stringify(record, null, 2)); } catch { /* the board dir is gone; nothing to tell */ }
 }
 
+// Every row, but only the columns a list needs. The free-tier org behind this
+// database is over its egress quota (vault: Cross-cutting/ops-schema.md), and the
+// note and why columns are nine tenths of a ticket's bytes.
+const allTickets = () => rpc("tickets_list", { p_limit: 5000 }, 8000, "id,kind,title,status,project,client,cwd,updated_at");
+
 async function resolveId(prefix) {
-  const rows = await rpc("tickets_list", { p_limit: 5000 });
+  const rows = await allTickets();
   const hits = rows.filter((r) => r.id.toLowerCase().startsWith(prefix.toLowerCase()));
   if (hits.length === 1) return hits[0];
   throw new Error(hits.length === 0 ? `no ticket starts with ${prefix}` : `${hits.length} tickets start with ${prefix}, give more of the id`);
@@ -157,9 +162,9 @@ async function resolveId(prefix) {
 const folder = (cwd) => (cwd ? cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() : null);
 
 async function list() {
-  const rows = (await rpc("tickets_list", { p_limit: 5000 })).filter((r) => r.status === "open");
+  const rows = (await allTickets()).filter((r) => r.status === "open");
   for (const r of rows) {
-    const where = r.project ?? folder(r.cwd) ?? "-";
+    const where = r.client ?? r.project ?? folder(r.cwd) ?? "-";
     const days = Math.floor((Date.now() - Date.parse(r.updated_at)) / 86_400_000);
     console.log(`${r.id.slice(0, 8)}  ${r.kind === "raised" ? "[raised] " : ""}${r.title}  (${where}, ${days === 0 ? "today" : `${days}d ago`})`);
   }
@@ -169,7 +174,7 @@ async function list() {
 async function backfill() {
   const days = Number(arg("days") ?? 7);
   const since = Date.now() - days * 86_400_000;
-  const have = new Set((await rpc("tickets_list", { p_limit: 5000 })).map((r) => r.id));
+  const have = new Set((await allTickets()).map((r) => r.id));
   const found = [];
   const skipped = {};
   for (const dir of readdirSync(PROJECTS, { withFileTypes: true })) {
