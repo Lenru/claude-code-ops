@@ -13,13 +13,15 @@ if (!title || !id) {
   process.exit(1);
 }
 
+// Both accounts on this PC: ~/.claude (personal) and ~/.claude-work (work).
 // ponytail: scans every project folder; fine at a few hundred chats
-const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
-const file = fs.readdirSync(root)
-  .map((d) => path.join(root, d, `${id}.jsonl`))
+const roots = [process.env.CLAUDE_CONFIG_DIR, path.join(os.homedir(), ".claude"), path.join(os.homedir(), ".claude-work")]
+  .filter(Boolean).map((r) => path.join(r, "projects")).filter((r) => fs.existsSync(r));
+const file = roots
+  .flatMap((root) => fs.readdirSync(root).map((d) => path.join(root, d, `${id}.jsonl`)))
   .find((f) => fs.existsSync(f));
 if (!file) {
-  console.error(`no transcript for ${id} under ${root}`);
+  console.error(`no transcript for ${id} under ${roots.join(", ")}`);
   process.exit(1);
 }
 
