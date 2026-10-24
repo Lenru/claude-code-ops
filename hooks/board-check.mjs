@@ -31,6 +31,8 @@ setTimeout(allow, 2000).unref?.();
 function main(input) {
   const target = input?.tool_input?.file_path ?? input?.tool_input?.notebook_path;
   if (!target) allow();
+  // Off switch (Noah, 2026-10-24, so an overnight chat never stalls on a prompt): delete board/PAUSED to re-arm.
+  if (fs.existsSync(path.join(os.homedir(), ".claude", "board", "PAUSED"))) allow();
 
   let board;
   try { board = JSON.parse(fs.readFileSync(BOARD, "utf8")); } catch { allow(); }
