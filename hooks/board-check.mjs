@@ -13,9 +13,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { BOARD_DIR } from "../scripts/lib/paths.mjs";
 
-const BOARD = path.join(os.homedir(), ".claude", "board", "board.json");
+const BOARD = path.join(BOARD_DIR, "board.json");
 
 function allow() { process.exit(0); }          // silence = proceed
 
@@ -32,7 +32,7 @@ function main(input) {
   const target = input?.tool_input?.file_path ?? input?.tool_input?.notebook_path;
   if (!target) allow();
   // Off switch (Noah, 2026-10-24, so an overnight chat never stalls on a prompt): delete board/PAUSED to re-arm.
-  if (fs.existsSync(path.join(os.homedir(), ".claude", "board", "PAUSED"))) allow();
+  if (fs.existsSync(path.join(BOARD_DIR, "PAUSED"))) allow();
 
   let board;
   try { board = JSON.parse(fs.readFileSync(BOARD, "utf8")); } catch { allow(); }

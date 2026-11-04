@@ -1,0 +1,12 @@
+{
+  "name": "claude-code-ops",
+  "version": "1.0.0",
+  "description": "Run many Claude Code chats on one machine without them colliding: a live board, a pre-edit check, self-renaming tabs and automatic tickets, all read from the transcripts Claude Code already writes.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20.12" },
+  "scripts": {
+    "test": "node --test",
+    "demo": "node example/demo.mjs"
+  }
+}

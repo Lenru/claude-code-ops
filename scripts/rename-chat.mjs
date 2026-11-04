@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Renames the CURRENT chat: the tab name in VS Code and the name in history.
-// Usage (from inside a chat): node ~/.claude/scripts/rename-chat.mjs "Clinic · posting"
+// Usage (from inside a chat): node scripts/rename-chat.mjs "Billing · refunds bug"
 // Works by appending the same line /rename writes to the chat's transcript.
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { PROJECTS } from "./lib/paths.mjs";
 
 const title = (process.argv[2] || "").trim();
 const id = process.env.CLAUDE_CODE_SESSION_ID;
@@ -13,15 +13,12 @@ if (!title || !id) {
   process.exit(1);
 }
 
-// Both accounts on this PC: ~/.claude (personal) and ~/.claude-work (work).
 // ponytail: scans every project folder; fine at a few hundred chats
-const roots = [process.env.CLAUDE_CONFIG_DIR, path.join(os.homedir(), ".claude"), path.join(os.homedir(), ".claude-work")]
-  .filter(Boolean).map((r) => path.join(r, "projects")).filter((r) => fs.existsSync(r));
-const file = roots
-  .flatMap((root) => fs.readdirSync(root).map((d) => path.join(root, d, `${id}.jsonl`)))
+const file = (fs.existsSync(PROJECTS) ? fs.readdirSync(PROJECTS) : [])
+  .map((d) => path.join(PROJECTS, d, `${id}.jsonl`))
   .find((f) => fs.existsSync(f));
 if (!file) {
-  console.error(`no transcript for ${id} under ${roots.join(", ")}`);
+  console.error(`no transcript for ${id} under ${PROJECTS}`);
   process.exit(1);
 }
 

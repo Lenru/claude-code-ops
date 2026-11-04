@@ -14,15 +14,14 @@
 //     which in practice means 1-2 files per run instead of 14
 //
 // Writes BOARD.md (for a human, pinned in VS Code) and board.json (for the
-// pre-edit check, which must be fast).
+// pre-edit check, which must be fast). Paths: scripts/lib/paths.mjs.
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { PROJECTS, BOARD_DIR as OUT_DIR } from "./lib/paths.mjs";
 
 const HOME = os.homedir();
-const PROJECTS = path.join(HOME, ".claude", "projects");
-const OUT_DIR = path.join(HOME, ".claude", "board");
 const CACHE = path.join(OUT_DIR, ".cache.json");
 const TAIL_BYTES = 400_000;   // enough for the recent turns of a busy chat
 const ACTIVE_HOURS = 2;       // how recent counts as "someone is in there now"
@@ -158,7 +157,7 @@ fs.writeFileSync(
   }),
 );
 
-// ---- BOARD.md: what Noah reads ----
+// ---- BOARD.md: what a human reads ----
 const fmt = ms => {
   const d = new Date(ms), mins = Math.round((now - ms) / 60000);
   const when = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -180,7 +179,7 @@ else {
   L.push("| Chat | Last active | Touching |");
   L.push("|---|---|---|");
   for (const r of active) {
-    L.push(`| **${r.title ?? "(untitled)"}** | ${fmt(r.mtimeMs)} | ${r.files.slice(-3).map(short).map(f => `\`${f.split("/").slice(-2).join("/")}\``).join("<br>") || "—"} |`);
+    L.push(`| **${r.title ?? "(untitled)"}** | ${fmt(r.mtimeMs)} | ${r.files.slice(-3).map(short).map(f => `\`${f.split("/").slice(-2).join("/")}\``).join("<br>") || "-"} |`);
   }
 }
 L.push("");
@@ -197,5 +196,5 @@ fs.writeFileSync(path.join(OUT_DIR, "BOARD.md"), L.join("\n"));
 
 if (process.argv.includes("--print")) {
   console.log(`chats: ${rows.length} total, ${active.length} live`);
-  for (const r of active) console.log(`  ${r.title ?? "(untitled)"} — ${r.files.length} files — ${fmt(r.mtimeMs)}`);
+  for (const r of active) console.log(`  ${r.title ?? "(untitled)"}: ${r.files.length} files, ${fmt(r.mtimeMs)}`);
 }

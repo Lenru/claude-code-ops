@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Tickets: one row per Claude chat, shown at /hub/desk/tickets.
+// Tickets: one per Claude chat, kept in <board dir>/tickets.json.
 //
 //   node scripts/ticket.mjs --hook                     the global Stop hook (reads stdin)
 //   node scripts/ticket.mjs --list                     open tickets, id first
-//   node scripts/ticket.mjs --add --title="…" [--why="…"] [--project=<thread slug>]
+//   node scripts/ticket.mjs --add --title="…" [--why="…"] [--project=<label>]
 //                                                      "ticket this": raise one mid-chat
 //   node scripts/ticket.mjs --done=<id or prefix>      close one
 //   node scripts/ticket.mjs --reopen=<id or prefix>
@@ -11,28 +11,29 @@
 //                                                      tickets for chats that predate the hook
 //
 // Noah, 2026-09-21: he wanted an issue ticket for every piece of work he does with
-// Claude, the way a dev team has issue numbers, because the vault and the PRIMER files record
-// all of this already and he opens neither.
+// Claude, the way a dev team has issue numbers, because his notes and session logs
+// record all of this already and he opens neither.
 //
 // A chat ticket's id IS the Claude session id (the transcript's filename), so the
 // hook upserts blind and cannot double-insert. Everything on a ticket is parsed out
 // of the transcript Claude Code writes anyway: no model call, nothing to remember.
 //
-// THE HOOK MUST NEVER COST A CHAT ANYTHING. It always exits 0, gives the network five
-// seconds, and writes what happened to ~/.claude/board/ticket-last.json, because a
-// hook that fails silently is how NewsRadar stayed dead for a month.
+// THE HOOK MUST NEVER COST A CHAT ANYTHING. It always exits 0, waits at most two
+// seconds for stdin, and writes what happened to <board dir>/ticket-last.json,
+// because a hook that fails silently is how one of the scheduled jobs stayed dead for a month.
 //
-// The database call is scripts/lib/hub-rpc.mjs: raw fetch, not supabase-js, because
-// this runs at the end of every turn of every chat on the machine.
+// The original wrote to a database table through definer functions. This version
+// keeps the same rules (scripts/lib/ticket-store.mjs) over a local JSON file.
 
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { parseTranscript, qualifies } from "./lib/ticket-parse.mjs";
-import { rpc } from "./lib/hub-rpc.mjs";
+import { add, resolve, setStatus, upsert } from "./lib/ticket-store.mjs";
+import { BOARD_DIR, PROJECTS } from "./lib/paths.mjs";
 
-const PROJECTS = join(homedir(), ".claude", "projects");
-const LAST = join(homedir(), ".claude", "board", "ticket-last.json");
+const LAST = join(BOARD_DIR, "ticket-last.json");
+const STORE = join(BOARD_DIR, "tickets.json");
 
 // Read a transcript whole up to here; past it, a head window (the first prompt and
 // where the chat started) plus a tail window (the title, the recent edits).
@@ -69,7 +70,24 @@ function readLines(path) {
   }
 }
 
-/** The ticket_upsert arguments for one transcript, or a reason there is no ticket. */
+// shortcut: read-modify-write with no lock, so two chats stopping in the same
+// millisecond can drop one update. The next turn of that chat writes it again.
+// Upgrade to a lock file if tickets ever carry state that is not re-derived.
+function load() {
+  let text;
+  try { text = readFileSync(STORE, "utf8"); } catch (e) { if (e.code === "ENOENT") return {}; throw e; }
+  // A file that will not parse throws rather than reading as empty: saving over it
+  // would wipe every ticket. The hook records the error in ticket-last.json instead.
+  return JSON.parse(text);
+}
+function save(db) {
+  mkdirSync(BOARD_DIR, { recursive: true });
+  // write then rename, so a reader never sees half a file
+  writeFileSync(`${STORE}.tmp`, JSON.stringify(db, null, 2));
+  renameSync(`${STORE}.tmp`, STORE);
+}
+
+/** The upsert arguments for one transcript, or a reason there is no ticket. */
 function ticketFor(sessionId, transcriptPath, { lastSaid = null, at = null } = {}) {
   const { lines, big } = readLines(transcriptPath);
   const t = parseTranscript(lines);
@@ -115,43 +133,42 @@ async function hook() {
       record.result = "skipped: no session on stdin";
     } else {
       const t = ticketFor(input.session_id, input.transcript_path, { lastSaid: input.last_assistant_message });
-      record.result = t.skip ? `skipped: ${t.skip}` : await rpc("ticket_upsert", t.args, { timeoutMs: 5000 });
+      if (t.skip) record.result = `skipped: ${t.skip}`;
+      else {
+        const db = load();
+        record.result = upsert(db, t.args);
+        save(db);
+      }
     }
   } catch (e) {
     record.ok = false;
     record.error = String(e?.message ?? e);
   }
-  try { writeFileSync(LAST, JSON.stringify(record, null, 2)); } catch { /* the board dir is gone; nothing to tell */ }
-}
-
-// Every row, but only the columns a list needs. The free-tier org behind this
-// database is over its egress quota (vault: Cross-cutting/ops-schema.md), and the
-// note and why columns are nine tenths of a ticket's bytes.
-const allTickets = () => rpc("tickets_list", { p_limit: 5000 }, { select: "id,kind,title,status,project,client,cwd,updated_at" });
-
-async function resolveId(prefix) {
-  const rows = await allTickets();
-  const hits = rows.filter((r) => r.id.toLowerCase().startsWith(prefix.toLowerCase()));
-  if (hits.length === 1) return hits[0];
-  throw new Error(hits.length === 0 ? `no ticket starts with ${prefix}` : `${hits.length} tickets start with ${prefix}, give more of the id`);
+  try {
+    mkdirSync(BOARD_DIR, { recursive: true });
+    writeFileSync(LAST, JSON.stringify(record, null, 2));
+  } catch { /* the board dir is unwritable; nothing to tell */ }
 }
 
 const folder = (cwd) => (cwd ? cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() : null);
 
-async function list() {
-  const rows = (await allTickets()).filter((r) => r.status === "open");
+function list() {
+  const rows = Object.values(load())
+    .filter((r) => r.status === "open")
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
   for (const r of rows) {
-    const where = r.client ?? r.project ?? folder(r.cwd) ?? "-";
+    const where = r.project ?? folder(r.cwd) ?? "-";
     const days = Math.floor((Date.now() - Date.parse(r.updated_at)) / 86_400_000);
     console.log(`${r.id.slice(0, 8)}  ${r.kind === "raised" ? "[raised] " : ""}${r.title}  (${where}, ${days === 0 ? "today" : `${days}d ago`})`);
   }
   console.log(`\n${rows.length} open ticket(s).`);
 }
 
-async function backfill() {
+function backfill() {
   const days = Number(arg("days") ?? 7);
   const since = Date.now() - days * 86_400_000;
-  const have = new Set((await allTickets()).map((r) => r.id));
+  const db = load();
+  const have = new Set(Object.keys(db));
   const found = [];
   const skipped = {};
   for (const dir of readdirSync(PROJECTS, { withFileTypes: true })) {
@@ -173,29 +190,28 @@ async function backfill() {
   console.log(`\n${found.length} chat(s) from the last ${days} day(s) would become tickets.`);
   for (const [why, n] of Object.entries(skipped)) console.log(`  left out, ${n}: ${why}`);
   if (!flag("write")) return console.log("\nDry run. Add --write to create them.");
-  let made = 0;
-  for (const a of found) {
-    await rpc("ticket_upsert", a);
-    made++;
-  }
-  console.log(`\nCreated ${made}.`);
+  for (const a of found) upsert(db, a);
+  save(db);
+  console.log(`\nCreated ${found.length}.`);
 }
 
-// Falls off the end rather than calling process.exit(): exiting while a fetch handle
-// is still closing trips a libuv assertion on Windows and returns 127 (thread.mjs).
 try {
   if (flag("hook")) await hook();
-  else if (flag("list")) await list();
-  else if (flag("backfill")) await backfill();
+  else if (flag("list")) list();
+  else if (flag("backfill")) backfill();
   else if (flag("add")) {
     const title = arg("title");
     if (!title) throw new Error('need --title="…"');
-    const id = await rpc("ticket_add", { p_title: title, p_why: arg("why"), p_project: arg("project") });
-    console.log(`raised ${String(id).slice(0, 8)}  ${title}`);
+    const db = load();
+    const id = add(db, { title, why: arg("why"), project: arg("project") }, randomUUID());
+    save(db);
+    console.log(`raised ${id.slice(0, 8)}  ${title}`);
   } else if (arg("done") || arg("reopen")) {
     const status = arg("done") ? "done" : "open";
-    const row = await resolveId(arg("done") ?? arg("reopen"));
-    await rpc("ticket_set", { p_id: row.id, p_status: status });
+    const db = load();
+    const row = resolve(db, arg("done") ?? arg("reopen"));
+    setStatus(db, row.id, status);
+    save(db);
     console.log(`${status === "done" ? "closed" : "reopened"} ${row.id.slice(0, 8)}  ${row.title}`);
   } else {
     console.error("usage: ticket.mjs --hook | --list | --add --title= [--why=] [--project=] | --done=<id> | --reopen=<id> | --backfill [--days=7] [--write]");
